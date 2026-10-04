@@ -285,12 +285,13 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /**
-   * Re-read after an action. GitHub can report the old state for a few
-   * seconds after a merge or "ready", so look again shortly after.
+   * Re-read after an action or an agent turn. GitHub can report the old
+   * state for a few seconds after a merge or "ready", and bb caches the PR
+   * lookup for ~10 s, so look again shortly after.
    */
   async function settle(threadId: string): Promise<void> {
     await refresh(threadId).catch(() => undefined);
-    for (const delay of [3_000, 10_000]) {
+    for (const delay of [3_000, 12_000, 30_000]) {
       const timer = setTimeout(() => {
         settleTimers.delete(timer);
         void refresh(threadId).catch(() => undefined);
@@ -587,10 +588,11 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  // An agent turn often ends with a push or a new PR: re-read right away
-  // rather than waiting for the timer.
+  // An agent turn often ends with a push or a new PR: re-read right away,
+  // then again once bb's PR cache has expired, rather than waiting for the
+  // timer.
   bb.events.on("thread.idle", ({ thread }) => {
-    if (watched.has(thread.id)) void refresh(thread.id).catch(() => undefined);
+    if (watched.has(thread.id)) void settle(thread.id);
   });
   bb.events.on("thread.archived", ({ thread }) => {
     watched.delete(thread.id);
