@@ -1,7 +1,8 @@
 // bb-plugin-pr-status — frontend.
 //
 // - Thread header: "Create PR" when the branch has none; otherwise a split
-//   button tinted by the PR's state — `#123` on the left (opens the PR), the
+//   button tinted by the PR's state — `#123` on the left (opens bb's GitHub
+//   PR tab, see lib/github-panel.ts), the
 //   next step on the right (Mark ready, Fix checks, Merge, Archive…). Right
 //   click for copy / open actions.
 // - Sidebar: a PR glyph on each thread row. Row statuses can only be set from
@@ -20,6 +21,7 @@ import {
   useRealtime,
   useRealtimeConnectionState,
   useRpc,
+  useSdk,
   type PluginComposerApi,
   type PluginComposerThreadRowStatus,
   type PluginSidebarPullRequest,
@@ -45,6 +47,7 @@ import {
   type PrAction,
   type PrKind,
 } from "@/lib/pr-state";
+import { addGithubPrTab, openGithubPrTabViaHost } from "@/lib/github-panel";
 import { cn } from "@/lib/utils";
 
 // Duplicated from server.ts: importing values from it would bundle the
@@ -240,6 +243,7 @@ async function copy(text: string, what: string): Promise<void> {
 function PrHeaderAction({ threadId, isCompactViewport }: PluginThreadHeaderActionProps) {
   const { rpc, snapshot, refetch } = useThreadPr(threadId);
   const navigate = useBbNavigate();
+  const sdk = useSdk();
   const composer = useThreadComposer(threadId);
   const threadActions = experimental_useSidebarThreadActions();
   const [pending, setPending] = useState(false);
@@ -300,6 +304,20 @@ function PrHeaderAction({ threadId, isCompactViewport }: PluginThreadHeaderActio
     [run, rpc, threadId, refetch, threadActions, prompt],
   );
 
+  /** bb's "GitHub PR" tab when we can reach it, else the PR in a browser. */
+  const openPr = useCallback(
+    async (button: Element, url: string) => {
+      if (openGithubPrTabViaHost(button)) return;
+      try {
+        await addGithubPrTab(sdk, threadId);
+        toast.success("Added a “GitHub PR” tab to the thread panel");
+      } catch {
+        if (!navigate.openUrl(url)) window.open(url, "_blank", "noopener");
+      }
+    },
+    [sdk, threadId, navigate],
+  );
+
   if (snapshot === null || snapshot.outcome === "unavailable") return null;
 
   if (snapshot.pr === null) {
@@ -337,9 +355,7 @@ function PrHeaderAction({ threadId, isCompactViewport }: PluginThreadHeaderActio
             size="sm"
             className={cn("h-7 gap-1 rounded-r-none border px-2 font-mono", tint)}
             aria-label={`Open pull request #${pr.number}`}
-            onClick={() => {
-              if (!navigate.openUrl(pr.url)) window.open(pr.url, "_blank", "noopener");
-            }}
+            onClick={(event) => void openPr(event.currentTarget, pr.url)}
           >
             <Icon name={KIND_ICON[kind]} className="size-3.5" />
             <span>#{pr.number}</span>

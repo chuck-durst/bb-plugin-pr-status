@@ -154,11 +154,13 @@ describe("header", () => {
     await waitFor(() => expect(slot.inspection.sidebarActionCalls).toHaveLength(1));
   });
 
-  it("opens the PR from the number", async () => {
+  it("falls back to the browser when bb's GitHub tab is out of reach", async () => {
     const slot = renderHeader(snapshot(pr("ready")));
     fireEvent.click(await slot.findByRole("button", { name: "Open pull request #42" }));
-    expect(slot.inspection.navigateCalls).toContainEqual(
-      expect.objectContaining({ method: "openUrl" }),
+    await waitFor(() =>
+      expect(slot.inspection.navigateCalls).toContainEqual(
+        expect.objectContaining({ method: "openUrl" }),
+      ),
     );
   });
 });
