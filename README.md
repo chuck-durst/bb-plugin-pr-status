@@ -115,3 +115,8 @@ npm run typecheck && npm test
 bb plugin build .
 bb plugin install . --yes     # or: bb plugin dev .
 ```
+
+`scripts/reset-playground.sh` puts the author's live test PRs (a private
+playground repo) back in their target states — checks running, one check
+failing, conflict, draft, no checks, ready — after testing has "fixed"
+them. Idempotent; see its header for the targets and requirements.
