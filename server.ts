@@ -537,10 +537,13 @@ export default async function plugin(bb: BbPluginApi) {
     pr_get: async ({ threadId, force }) => {
       watched.set(threadId, Date.now());
       const cached = snapshots.get(threadId);
-      if (!force && cached !== undefined && Date.now() - cached.fetchedAt < CACHE_FRESH_MS) {
-        return cached;
+      if (force || cached === undefined) return refresh(threadId);
+      // Stale-while-revalidate: answer now, re-read in the background; a
+      // change reaches the app through PR_CHANGED.
+      if (Date.now() - cached.fetchedAt >= CACHE_FRESH_MS) {
+        void refresh(threadId).catch(() => undefined);
       }
-      return refresh(threadId);
+      return cached;
     },
     pr_mark_ready: async ({ threadId }) => {
       const environmentId = await requireEnvironment(threadId);

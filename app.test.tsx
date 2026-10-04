@@ -13,6 +13,7 @@ import type {
 } from "@get-bb/plugin-sdk/app";
 import type { PrInfo, PrSnapshot, rpcContract } from "./server";
 import type { PrKind } from "./lib/pr-state";
+import { prCache } from "./lib/pr-cache";
 
 const app = await loadPluginApp(() => import("./app"));
 const header = app.threadHeaderActions[0]!;
@@ -20,6 +21,7 @@ const overlay = app.appOverlays[0]!;
 
 afterEach(() => {
   cleanup();
+  prCache.clear();
   delete (globalThis as Record<string, unknown>).__bbCommandsRunningThreads;
 });
 
@@ -165,6 +167,46 @@ describe("header", () => {
   });
 });
 
+describe("instant render", () => {
+  const never = () => new Promise<never>(() => undefined);
+
+  it("shows a neutral placeholder, not Create PR, before the first answer", async () => {
+    const slot = renderSlot<PluginThreadHeaderActionProps, typeof rpcContract>(
+      header,
+      { threadId: "t1", projectId: "p1", isCompactViewport: false },
+      { rpc: { pr_get: never } as never },
+    );
+    expect(slot.container.querySelector("[data-pr-status-placeholder]")).not.toBeNull();
+    expect(slot.queryByRole("button", { name: "Create PR" })).toBeNull();
+  });
+
+  it("renders the cached state at once, then revalidates", async () => {
+    prCache.setFromServer("t1", snapshot(pr("checks_failed")));
+    const slot = renderSlot<PluginThreadHeaderActionProps, typeof rpcContract>(
+      header,
+      { threadId: "t1", projectId: "p1", isCompactViewport: false },
+      { rpc: { pr_get: () => snapshot(pr("ready")) } as never, openUrl: () => true },
+    );
+    // Synchronous: no waiting on the server.
+    expect(slot.getByRole("button", { name: "Fix checks" })).toBeTruthy();
+    expect(await slot.findByRole("button", { name: "Merge" })).toBeTruthy();
+  });
+
+  it("never shows the previous thread's PR when the header switches threads", async () => {
+    prCache.setFromServer("t1", snapshot(pr("ready", { number: 1 })));
+    const slot = renderSlot<PluginThreadHeaderActionProps, typeof rpcContract>(
+      header,
+      { threadId: "t1", projectId: "p1", isCompactViewport: false },
+      { rpc: { pr_get: never } as never },
+    );
+    expect(slot.getByRole("button", { name: "Open pull request #1" })).toBeTruthy();
+    const Header = header.component;
+    slot.lifecycle.rerender(<Header threadId="t2" projectId="p1" isCompactViewport={false} />);
+    expect(slot.queryByRole("button", { name: "Open pull request #1" })).toBeNull();
+    expect(slot.container.querySelector("[data-pr-status-placeholder]")).not.toBeNull();
+  });
+});
+
 describe("sidebar", () => {
   function sidebarPr(
     facts: Partial<{
@@ -205,6 +247,8 @@ describe("sidebar", () => {
       }),
     );
     expect(scripts.inspection.getThreadRowStatus("b")).toMatchObject({ tone: "success" });
+    // …and warmed the header's cache.
+    expect(prCache.get("b")?.snapshot.pr?.kind).toBe("ready");
 
     (globalThis as Record<string, unknown>).__bbCommandsRunningThreads = new Set(["a"]);
     window.dispatchEvent(new Event("bb-commands:running-threads"));

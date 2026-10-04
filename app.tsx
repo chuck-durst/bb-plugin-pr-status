@@ -48,6 +48,7 @@ import {
   type PrKind,
 } from "@/lib/pr-state";
 import { addGithubPrTab, openGithubPrTabViaHost } from "@/lib/github-panel";
+import { prCache, useCachedPr } from "@/lib/pr-cache";
 import { cn } from "@/lib/utils";
 
 // Duplicated from server.ts: importing values from it would bundle the
@@ -66,15 +67,19 @@ function changedThreadId(payload: unknown): string | null {
   return typeof threadId === "string" ? threadId : null;
 }
 
-/** The PR snapshot of one thread, refreshed by the server's signal. */
+/**
+ * The PR snapshot of one thread: the last known one from the shared cache
+ * right away (stale-while-revalidate), refreshed from the server on mount and
+ * on its signal.
+ */
 function useThreadPr(threadId: string) {
   const rpc = useRpc<typeof rpcContract>();
-  const [snapshot, setSnapshot] = useState<PrSnapshot | null>(null);
+  const snapshot = useCachedPr(threadId)?.snapshot ?? null;
 
   const refetch = useCallback(
     (force = false) => {
       rpc.call("pr_get", { threadId, force }).then(
-        (result) => setSnapshot(result as PrSnapshot),
+        (result) => prCache.setFromServer(threadId, result as PrSnapshot),
         () => undefined,
       );
     },
@@ -82,7 +87,6 @@ function useThreadPr(threadId: string) {
   );
 
   useEffect(() => {
-    setSnapshot(null);
     refetch();
     // Also keeps the thread on the server's watch list while it is on screen.
     const timer = setInterval(() => refetch(), HEARTBEAT_MS);
@@ -203,7 +207,9 @@ const ACTION_ICON: Record<Exclude<PrAction, null>, string> = {
 
 function checksSummary(pr: PrInfo): string | null {
   const { failedCount, pendingCount, totalCount, state } = pr.checks;
-  if (totalCount === 0 || state === "no_checks") return "no checks";
+  if (state === "no_checks") return "no checks";
+  // A sidebar-sourced snapshot has the state but no counts yet.
+  if (totalCount === 0) return `checks ${state}`;
   if (failedCount > 0) return `${failedCount}/${totalCount} checks failing`;
   if (pendingCount > 0) return `${totalCount - pendingCount}/${totalCount} checks done`;
   return `${totalCount}/${totalCount} checks passed`;
@@ -211,7 +217,7 @@ function checksSummary(pr: PrInfo): string | null {
 
 /** Label of the right half when the state has no action. */
 function statusLabel(pr: PrInfo): string {
-  if (pr.kind === "checks_pending") {
+  if (pr.kind === "checks_pending" && pr.checks.totalCount > 0) {
     const done = pr.checks.totalCount - pr.checks.pendingCount;
     return `Checks running ${done}/${pr.checks.totalCount}`;
   }
@@ -227,8 +233,12 @@ function prTitle(pr: PrInfo): string {
   return [
     `PR #${pr.number} — ${pr.title}`,
     `${KIND_LABELS[pr.kind]} · ${[checksSummary(pr), review].filter(Boolean).join(" · ")}`,
-    `${pr.headRefName} → ${pr.baseRefName}${pr.autoMerge ? " · auto-merge on" : ""}`,
-  ].join("\n");
+    pr.headRefName === ""
+      ? null
+      : `${pr.headRefName} → ${pr.baseRefName}${pr.autoMerge ? " · auto-merge on" : ""}`,
+  ]
+    .filter((line) => line !== null)
+    .join("\n");
 }
 
 async function copy(text: string, what: string): Promise<void> {
@@ -318,7 +328,19 @@ function PrHeaderAction({ threadId, isCompactViewport }: PluginThreadHeaderActio
     [sdk, threadId, navigate],
   );
 
-  if (snapshot === null || snapshot.outcome === "unavailable") return null;
+  // Nothing known yet for this thread: hold the spot with a neutral block the
+  // size of the button rather than guess (no "Create PR" flash on a thread
+  // that has a PR).
+  if (snapshot === null) {
+    return (
+      <div
+        aria-hidden
+        data-pr-status-placeholder=""
+        className="h-7 w-24 rounded-md border border-border bg-muted/40"
+      />
+    );
+  }
+  if (snapshot.outcome === "unavailable") return null;
 
   if (snapshot.pr === null) {
     if (!snapshot.canCreate) return null;
@@ -460,7 +482,11 @@ function rowStatusOf(pr: PluginSidebarPullRequest): PluginComposerThreadRowStatu
 
 /** Mirrors bb's PR state of one thread into the bridge. Renders nothing. */
 function ThreadPrProbe({ threadId }: { threadId: string }) {
-  const { pullRequest } = experimental_useSidebarThreadPullRequest(threadId);
+  const { pullRequest, isLoading } = experimental_useSidebarThreadPullRequest(threadId);
+  // Warm the header's cache: opening this thread then renders at once.
+  useEffect(() => {
+    if (!isLoading) prCache.setFromSidebar(threadId, pullRequest);
+  }, [threadId, pullRequest, isLoading]);
   // The hook may hand back a new object for the same state; key on content.
   const status = pullRequest === null ? null : rowStatusOf(pullRequest);
   const key = status === null ? null : JSON.stringify(status);
