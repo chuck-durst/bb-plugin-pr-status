@@ -12,7 +12,7 @@ import type {
   PluginThreadHeaderActionProps,
 } from "@get-bb/plugin-sdk/app";
 import type { PrInfo, PrSnapshot, rpcContract } from "./server";
-import { prKind, type PrAttention } from "./lib/pr-state";
+import type { PrKind } from "./lib/pr-state";
 
 const app = await loadPluginApp(() => import("./app"));
 const header = app.threadHeaderActions[0]!;
@@ -23,21 +23,22 @@ afterEach(() => {
   delete (globalThis as Record<string, unknown>).__bbCommandsRunningThreads;
 });
 
-function pr(attention: PrAttention, overrides: Partial<PrInfo> = {}): PrInfo {
-  const kind = prKind(attention);
+/** The header renders from the server's `kind`; the other facts feed labels. */
+function pr(kind: PrKind, overrides: Partial<PrInfo> = {}): PrInfo {
   return {
     number: 42,
     title: "Add the thing",
     url: "https://github.com/acme/app/pull/42",
     state: kind === "merged" ? "merged" : kind === "closed" ? "closed" : kind === "draft" ? "draft" : "open",
-    attention,
+    attention: "none",
     kind,
     baseRefName: "main",
     headRefName: "feature",
     autoMerge: false,
     checks: { state: "failing", failedCount: 1, passedCount: 2, pendingCount: 0, totalCount: 3 },
     review: { state: "none", reviewRequestCount: 0 },
-    mergeability: { state: "mergeable" },
+    mergeability: { state: "mergeable", mergeStateStatus: "CLEAN" },
+    inMergeQueue: false,
     ...overrides,
   };
 }
@@ -60,6 +61,7 @@ function renderHeader(initial: PrSnapshot) {
       rpc: {
         pr_get: () => initial,
         pr_mark_ready: () => ({ message: "ready" }),
+        pr_update_branch: () => ({ message: "updated" }),
         pr_merge: () => ({ message: "Pull request merge started", method: "squash" }),
         pr_prompt: ({ action }) => ({ prompt: `prompt:${action}` }),
       },
@@ -88,13 +90,33 @@ describe("header", () => {
     ["checks_failed", "Fix checks"],
     ["conflicts", "Fix conflicts"],
     ["changes_requested", "Address review"],
-    ["ready_to_merge", "Merge"],
+    ["ready", "Merge"],
+    ["behind", "Update branch"],
     ["merged", "Archive"],
     ["closed", "Archive"],
-  ] as const)("%s → %s", async (attention, label) => {
-    const slot = renderHeader(snapshot(pr(attention)));
+  ] as const)("%s → %s", async (kind, label) => {
+    const slot = renderHeader(snapshot(pr(kind)));
     expect(await slot.findByRole("button", { name: "Open pull request #42" })).toBeTruthy();
     expect(await slot.findByRole("button", { name: label })).toBeTruthy();
+  });
+
+  it.each([
+    ["review", "Review required"],
+    ["blocked", "Blocked"],
+    ["checking", "Checking…"],
+    ["queued", "In merge queue"],
+  ] as const)("%s → %s, no action", async (kind, label) => {
+    const slot = renderHeader(snapshot(pr(kind)));
+    const button = await slot.findByRole("button", { name: label });
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("updates a branch behind its base directly", async () => {
+    const slot = renderHeader(snapshot(pr("behind")));
+    fireEvent.click(await slot.findByRole("button", { name: "Update branch" }));
+    await waitFor(() =>
+      expect(slot.inspection.rpcCalls.some((call) => call.method === "pr_update_branch")).toBe(true),
+    );
   });
 
   it("labels running checks without an action", async () => {
@@ -110,7 +132,7 @@ describe("header", () => {
   });
 
   it("merges directly", async () => {
-    const slot = renderHeader(snapshot(pr("ready_to_merge")));
+    const slot = renderHeader(snapshot(pr("ready")));
     fireEvent.click(await slot.findByRole("button", { name: "Merge" }));
     await waitFor(() =>
       expect(slot.inspection.rpcCalls.some((call) => call.method === "pr_merge")).toBe(true),
@@ -133,7 +155,7 @@ describe("header", () => {
   });
 
   it("opens the PR from the number", async () => {
-    const slot = renderHeader(snapshot(pr("ready_to_merge")));
+    const slot = renderHeader(snapshot(pr("ready")));
     fireEvent.click(await slot.findByRole("button", { name: "Open pull request #42" }));
     expect(slot.inspection.navigateCalls).toContainEqual(
       expect.objectContaining({ method: "openUrl" }),
@@ -142,18 +164,23 @@ describe("header", () => {
 });
 
 describe("sidebar", () => {
-  function sidebarPr(attention: PluginSidebarPullRequest["attention"]): PluginSidebarPullRequest {
+  function sidebarPr(
+    facts: Partial<{
+      checks: PluginSidebarPullRequest["experimental_checks"]["state"];
+      mergeability: PluginSidebarPullRequest["experimental_mergeability"]["state"];
+    }>,
+  ): PluginSidebarPullRequest {
     return {
       number: 7,
       title: "x",
       url: "https://github.com/acme/app/pull/7",
       state: "open",
-      attention,
+      attention: "none",
       experimental_autoMerge: false,
       experimental_inMergeQueue: null,
-      experimental_checks: { state: "failing" },
+      experimental_checks: { state: facts.checks ?? "passing" },
       experimental_review: { state: "none" },
-      experimental_mergeability: { state: "mergeable" },
+      experimental_mergeability: { state: facts.mergeability ?? "mergeable" },
     };
   }
   const thread = (id: string) =>
@@ -163,7 +190,11 @@ describe("sidebar", () => {
     const scripts = await mountPluginContentScripts(app, { pluginId: "pr-status" });
     const slot = renderSlot(overlay, {}, {
       sidebarThreads: { status: "ready", threads: [thread("a"), thread("b")] },
-      sidebarPullRequests: { a: sidebarPr("checks_failed"), b: sidebarPr("ready_to_merge") },
+      sidebarPullRequests: {
+        a: sidebarPr({ checks: "failing" }),
+        // bb reports `attention: "none"` here: mergeable, no checks.
+        b: sidebarPr({ checks: "no_checks" }),
+      },
     });
     await waitFor(() =>
       expect(scripts.inspection.getThreadRowStatus("a")).toMatchObject({

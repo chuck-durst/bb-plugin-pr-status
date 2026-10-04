@@ -11,7 +11,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { prKind, type PrAttention, type PrKind } from "./lib/pr-state";
+import { derivePrKind, type PrAttention, type PrKind } from "./lib/pr-state";
 
 /** Realtime channel; the payload is `{ threadId }`. */
 export const PR_CHANGED = "pr-changed";
@@ -34,7 +34,8 @@ const prSchema = z.object({
     totalCount: z.number(),
   }),
   review: z.object({ state: z.string(), reviewRequestCount: z.number() }),
-  mergeability: z.object({ state: z.string() }),
+  mergeability: z.object({ state: z.string(), mergeStateStatus: z.string().nullable() }),
+  inMergeQueue: z.boolean().nullable(),
 });
 export type PrInfo = Omit<z.infer<typeof prSchema>, "attention" | "kind"> & {
   attention: PrAttention;
@@ -66,6 +67,10 @@ export const rpcContract = defineRpcContract({
     input: threadInput,
     output: z.object({ message: z.string() }),
   },
+  pr_update_branch: {
+    input: threadInput,
+    output: z.object({ message: z.string() }),
+  },
   pr_merge: {
     input: threadInput,
     output: z.object({ message: z.string(), method: z.string() }),
@@ -83,6 +88,7 @@ export const rpcContract = defineRpcContract({
 const WATCH_TTL_MS = 10 * 60_000;
 const TICK_MS = 10_000;
 /** How old a snapshot may get before the poller re-reads it. */
+const REFRESH_CHECKING_MS = 10_000;
 const REFRESH_PENDING_MS = 30_000;
 const REFRESH_OPEN_MS = 60_000;
 const REFRESH_DONE_MS = 5 * 60_000;
@@ -166,6 +172,7 @@ function refreshAge(snapshot: PrSnapshot): number {
   if (snapshot.pr === null) return REFRESH_NONE_MS;
   const { kind } = snapshot.pr;
   if (kind === "merged" || kind === "closed") return REFRESH_DONE_MS;
+  if (kind === "checking") return REFRESH_CHECKING_MS;
   if (kind === "checks_pending" || kind === "queued") return REFRESH_PENDING_MS;
   return REFRESH_OPEN_MS;
 }
@@ -232,7 +239,14 @@ export default async function plugin(bb: BbPluginApi) {
         url: pr.url,
         state: pr.state,
         attention: pr.attention,
-        kind: prKind(pr.attention),
+        kind: derivePrKind({
+          state: pr.state,
+          checks: pr.checks.state,
+          review: pr.review.state,
+          mergeability: pr.mergeability.state,
+          mergeStateStatus: pr.mergeability.mergeStateStatus,
+          inMergeQueue: pr.inMergeQueue,
+        }),
         baseRefName: pr.baseRefName,
         headRefName: pr.headRefName,
         autoMerge: pr.autoMerge,
@@ -244,7 +258,11 @@ export default async function plugin(bb: BbPluginApi) {
           totalCount: pr.checks.totalCount,
         },
         review: { state: pr.review.state, reviewRequestCount: pr.review.reviewRequestCount },
-        mergeability: { state: pr.mergeability.state },
+        mergeability: {
+          state: pr.mergeability.state,
+          mergeStateStatus: pr.mergeability.mergeStateStatus,
+        },
+        inMergeQueue: pr.inMergeQueue,
       },
     };
   }
@@ -519,9 +537,26 @@ export default async function plugin(bb: BbPluginApi) {
       const parsed = parsePrUrl(pr.url);
       if (parsed === null) throw new Error(`Not a GitHub pull request: ${pr.url}`);
       const method = await mergeMethodFor(parsed.repo);
+      // bb's merge refuses anything it does not call "mergeable", including
+      // GitHub's HAS_HOOKS state, which GitHub does merge.
+      if (pr.mergeability.state !== "mergeable") {
+        await gh(["pr", "merge", String(parsed.number), "-R", parsed.repo, `--${method}`]);
+        await refresh(threadId).catch(() => undefined);
+        return { message: `Merged #${parsed.number}`, method };
+      }
       const result = await bb.sdk.environments.mergePullRequest({ environmentId, method });
       await refresh(threadId).catch(() => undefined);
       return { message: result.message, method: result.method };
+    },
+    pr_update_branch: async ({ threadId }) => {
+      const { pr } = await currentPr(threadId);
+      const parsed = parsePrUrl(pr.url);
+      if (parsed === null) throw new Error(`Not a GitHub pull request: ${pr.url}`);
+      // Merges the base into the PR branch on GitHub, like its "Update branch"
+      // button. The agent's checkout needs a pull afterwards.
+      await gh(["pr", "update-branch", String(parsed.number), "-R", parsed.repo]);
+      await refresh(threadId).catch(() => undefined);
+      return { message: `Updated ${pr.headRefName} with ${pr.baseRefName}` };
     },
     pr_prompt: async ({ threadId, action }) => {
       if (action === "create") return { prompt: await createPrompt(threadId) };

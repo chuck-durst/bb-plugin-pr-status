@@ -22,6 +22,7 @@ import {
   useRpc,
   type PluginComposerApi,
   type PluginComposerThreadRowStatus,
+  type PluginSidebarPullRequest,
   type PluginThreadHeaderActionProps,
 } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
@@ -40,7 +41,7 @@ import {
   KIND_LABELS,
   KIND_ROW_STATUS,
   prAction,
-  prKind,
+  derivePrKind,
   type PrAction,
   type PrKind,
 } from "@/lib/pr-state";
@@ -158,10 +159,15 @@ const KIND_TINT: Record<PrKind, string> = {
     "border-sky-500/40 bg-sky-500/10 text-sky-700 hover:bg-sky-500/20 hover:text-sky-700 dark:text-sky-400 dark:hover:text-sky-400",
   review:
     "border-yellow-500/40 bg-yellow-500/10 text-yellow-700 hover:bg-yellow-500/20 hover:text-yellow-700 dark:text-yellow-400 dark:hover:text-yellow-400",
+  blocked:
+    "border-yellow-500/40 bg-yellow-500/10 text-yellow-700 hover:bg-yellow-500/20 hover:text-yellow-700 dark:text-yellow-400 dark:hover:text-yellow-400",
+  behind:
+    "border-yellow-500/40 bg-yellow-500/10 text-yellow-700 hover:bg-yellow-500/20 hover:text-yellow-700 dark:text-yellow-400 dark:hover:text-yellow-400",
   merged:
     "border-purple-500/40 bg-purple-500/10 text-purple-700 hover:bg-purple-500/20 hover:text-purple-700 dark:text-purple-400 dark:hover:text-purple-400",
   draft: "border-border bg-muted/60 text-muted-foreground",
   closed: "border-border bg-muted/60 text-muted-foreground",
+  checking: "border-border",
   open: "border-border",
 };
 
@@ -172,7 +178,10 @@ const KIND_ICON: Record<PrKind, string> = {
   conflicts: "AlertTriangle",
   changes_requested: "MessageSquare",
   review: "Eye",
+  blocked: "Lock",
+  behind: "ArrowDown",
   queued: "ListEnd",
+  checking: "Spinner",
   ready: "GitMerge",
   open: "GitPullRequest",
   merged: "GitMerge",
@@ -184,6 +193,7 @@ const ACTION_ICON: Record<Exclude<PrAction, null>, string> = {
   fix_checks: "ToolCase",
   fix_conflicts: "ToolCase",
   address_review: "MessageSquare",
+  update_branch: "ArrowDown",
   merge: "GitMerge",
   archive: "Archive",
 };
@@ -203,6 +213,8 @@ function statusLabel(pr: PrInfo): string {
     return `Checks running ${done}/${pr.checks.totalCount}`;
   }
   if (pr.kind === "review") return "Review required";
+  if (pr.kind === "blocked") return "Blocked";
+  if (pr.kind === "checking") return "Checking…";
   return KIND_LABELS[pr.kind];
 }
 
@@ -271,6 +283,12 @@ function PrHeaderAction({ threadId, isCompactViewport }: PluginThreadHeaderActio
             toast.success(`${result.message} (${result.method})`);
             refetch(true);
           });
+        case "update_branch":
+          return run(async () => {
+            const result = await rpc.call("pr_update_branch", { threadId });
+            toast.success(result.message);
+            refetch(true);
+          });
         case "archive":
           return run(async () => {
             threadActions.archive(threadId);
@@ -304,7 +322,7 @@ function PrHeaderAction({ threadId, isCompactViewport }: PluginThreadHeaderActio
   }
 
   const pr = snapshot.pr;
-  const kind: PrKind = pr.kind ?? prKind(pr.attention);
+  const kind: PrKind = pr.kind;
   const action = prAction(kind);
   const tint = KIND_TINT[kind];
   const title = prTitle(pr);
@@ -413,27 +431,31 @@ const rowStatusBridge = {
   },
 };
 
-function rowStatusOf(pr: {
-  number: number;
-  attention: Parameters<typeof prKind>[0];
-}): PluginComposerThreadRowStatus {
-  const kind = prKind(pr.attention);
+function rowStatusOf(pr: PluginSidebarPullRequest): PluginComposerThreadRowStatus {
+  const kind = derivePrKind({
+    state: pr.state,
+    checks: pr.experimental_checks.state,
+    review: pr.experimental_review.state,
+    mergeability: pr.experimental_mergeability.state,
+    inMergeQueue: pr.experimental_inMergeQueue,
+  });
   return { ...KIND_ROW_STATUS[kind], label: `PR #${pr.number} — ${KIND_LABELS[kind]}` };
 }
 
 /** Mirrors bb's PR state of one thread into the bridge. Renders nothing. */
 function ThreadPrProbe({ threadId }: { threadId: string }) {
   const { pullRequest } = experimental_useSidebarThreadPullRequest(threadId);
-  const number = pullRequest?.number;
-  const attention = pullRequest?.attention;
+  // The hook may hand back a new object for the same state; key on content.
+  const status = pullRequest === null ? null : rowStatusOf(pullRequest);
+  const key = status === null ? null : JSON.stringify(status);
   useEffect(() => {
-    if (number === undefined || attention === undefined) {
+    if (key === null) {
       rowStatusBridge.wanted.delete(threadId);
     } else {
-      rowStatusBridge.wanted.set(threadId, rowStatusOf({ number, attention }));
+      rowStatusBridge.wanted.set(threadId, JSON.parse(key) as PluginComposerThreadRowStatus);
     }
     rowStatusBridge.sync();
-  }, [threadId, number, attention]);
+  }, [threadId, key]);
   useEffect(
     () => () => {
       rowStatusBridge.wanted.delete(threadId);
