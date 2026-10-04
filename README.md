@@ -19,7 +19,8 @@ one (commit, push, title, description), targeting the environment's merge base
 or the default branch. It is hidden on the default branch.
 
 With a PR, a split button tinted by the PR's state: `#123` on the left opens
-the PR; the right half is the next step.
+bb's own **GitHub PR** tab in the thread panel; the right half is the next
+step.
 
 | State | Tint | Right half |
 | --- | --- | --- |
@@ -28,11 +29,19 @@ the PR; the right half is the next step.
 | Checks failing | red | **Fix checks** — prompt with each failing check, its link and the tail of its failed log |
 | Conflicts | orange | **Fix conflicts** — prompt to rebase on / merge the base and resolve |
 | Changes requested | orange | **Address review** — prompt with the review bodies and unresolved review threads |
-| Waiting for review / blocked | yellow | `Review required` (no action) |
+| Required review missing | yellow | `Review required` (no action) |
+| Blocked by other branch rules | yellow | `Blocked` (no action) |
+| Behind its base (branch rules require it up to date) | yellow | **Update branch** — `gh pr update-branch`, right away |
 | In merge queue | blue | `In merge queue` (no action) |
-| Ready to merge | green | **Merge** — merges right away, no confirmation |
+| GitHub still computing mergeability | neutral | `Checking…` (re-read every 10 s) |
+| Ready to merge: open, no conflict, nothing failing or running, no changes requested, mergeable — with or without checks | green | **Merge** — merges right away, no confirmation |
 | Merged | purple | **Archive** the thread |
 | Closed | gray | **Archive** the thread |
+
+The state is derived from bb's raw PR facts (`lib/pr-state.ts`), not only from
+bb's `attention`: bb only says `ready_to_merge` when checks *pass*, so a PR
+without checks would otherwise stay gray, and its `blocked` mixes branch rules,
+"behind base" and GitHub's HAS_HOOKS (mergeable).
 
 Prompts go through the thread's composer and are sent as if typed (queued if
 the agent is busy); a draft you were writing is put back afterwards. The
@@ -53,10 +62,10 @@ rebase, whichever is allowed. The branch is not deleted.
 | Conflicts | `AlertTriangle` | error |
 | Changes requested | `GitPullRequestArrow` | error |
 | Checks running, merge queue | `GitPullRequest` | running |
+| Review, blocked, behind, checking | `GitPullRequest` | default |
 | Draft | `GitPullRequestDraft` | default |
 | Merged | `GitMerge` | default |
 | Closed | `GitPullRequestClosed` | default |
-| Review / other open | `GitPullRequest` | default |
 
 bb only lets a plugin pick an icon and one of four tones for a row, so the
 sidebar cannot use the header's colors.
@@ -71,9 +80,13 @@ PR glyph back when the command stops.
 
 ## Limits
 
-- The header cannot open bb's built-in **GitHub PR** panel: the SDK only lets
-  a plugin open its own panels. `#123` opens the PR URL through bb's browser
-  preference instead.
+- Opening bb's **GitHub PR** tab relies on bb internals: the SDK only lets a
+  plugin open its own panels, so `#123` walks up React's tree to the thread
+  view's own panel opener (`lib/github-panel.ts`). If a bb release changes
+  that, it falls back to adding the tab through the public
+  `sdk.threads.tabs` (tab added, not focused), then to the browser.
+- The sidebar follows bb's own per-row PR data, refreshed every 30 s while
+  checks run: it can lag the header by up to ~30 s.
 - GitHub only (bb's PR lookup is GitHub-based). Failing-check logs are fetched
   for GitHub Actions jobs; other checks get their link only.
 - `gh` runs on the bb server's machine. It is looked up in
@@ -85,7 +98,9 @@ PR glyph back when the command stops.
   the threads the app shows, re-reads them every 30 s (checks running), 60 s
   (open), 2 min (no PR) or 5 min (merged/closed) while they were viewed in the
   last 10 minutes, and right after each agent turn. Publishes `pr-changed`
-  when a snapshot changes. Builds the prompts and runs Mark ready / Merge.
+  when a snapshot changes, and re-reads 3 s and 10 s after an action (GitHub
+lags). Builds the prompts and runs Mark ready / Update branch / Merge (bb's
+merge, or `gh pr merge` for states bb's merge refuses, like HAS_HOOKS).
 - `app.tsx` — the header button and its context menu; an invisible overlay
   mirrors bb's own per-row PR state (`experimental_useSidebarThreadPullRequest`,
   no extra GitHub calls) into row statuses through a content script.

@@ -283,6 +283,17 @@ export default async function plugin(bb: BbPluginApi) {
     return next;
   }
 
+  /**
+   * Re-read after an action. GitHub can report the old state for a few
+   * seconds after a merge or "ready", so look again shortly after.
+   */
+  async function settle(threadId: string): Promise<void> {
+    await refresh(threadId).catch(() => undefined);
+    for (const delay of [3_000, 10_000]) {
+      setTimeout(() => void refresh(threadId).catch(() => undefined), delay);
+    }
+  }
+
   async function currentPr(threadId: string): Promise<{ environmentId: string; pr: PrInfo }> {
     const environmentId = await requireEnvironment(threadId);
     const snapshot = await refresh(threadId);
@@ -353,6 +364,7 @@ export default async function plugin(bb: BbPluginApi) {
       const lines = log
         .split("\n")
         .map((line) => line.split("\t").slice(2).join("\t") || line)
+        .map((line) => line.replace(/^\uFEFF/, ""))
         .map((line) => line.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z ?/, ""))
         .map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""))
         .filter((line) => line.trim() !== "");
@@ -528,7 +540,7 @@ export default async function plugin(bb: BbPluginApi) {
     pr_mark_ready: async ({ threadId }) => {
       const environmentId = await requireEnvironment(threadId);
       const result = await bb.sdk.environments.markPullRequestReady({ environmentId });
-      await refresh(threadId).catch(() => undefined);
+      await settle(threadId);
       return { message: result.message };
     },
     pr_merge: async ({ threadId }) => {
@@ -541,11 +553,11 @@ export default async function plugin(bb: BbPluginApi) {
       // GitHub's HAS_HOOKS state, which GitHub does merge.
       if (pr.mergeability.state !== "mergeable") {
         await gh(["pr", "merge", String(parsed.number), "-R", parsed.repo, `--${method}`]);
-        await refresh(threadId).catch(() => undefined);
+        await settle(threadId);
         return { message: `Merged #${parsed.number}`, method };
       }
       const result = await bb.sdk.environments.mergePullRequest({ environmentId, method });
-      await refresh(threadId).catch(() => undefined);
+      await settle(threadId);
       return { message: result.message, method: result.method };
     },
     pr_update_branch: async ({ threadId }) => {
@@ -555,7 +567,7 @@ export default async function plugin(bb: BbPluginApi) {
       // Merges the base into the PR branch on GitHub, like its "Update branch"
       // button. The agent's checkout needs a pull afterwards.
       await gh(["pr", "update-branch", String(parsed.number), "-R", parsed.repo]);
-      await refresh(threadId).catch(() => undefined);
+      await settle(threadId);
       return { message: `Updated ${pr.headRefName} with ${pr.baseRefName}` };
     },
     pr_prompt: async ({ threadId, action }) => {

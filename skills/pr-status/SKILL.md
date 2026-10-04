@@ -14,7 +14,8 @@ GitHub lookup for the thread's environment (`gh pr view` on the branch).
 - No PR on a feature branch: **Create PR** sends the agent a prompt to commit,
   push and open a PR against the environment's merge base (or the default
   branch). Hidden on the default branch and outside git workspaces.
-- With a PR: `#<number>` opens the PR; the right half is the next step.
+- With a PR: `#<number>` opens bb's **GitHub PR** tab in the thread panel
+  (falls back to the browser); the right half is the next step.
   - Draft → **Mark ready** (`gh pr ready`, no prompt).
   - Checks failing → **Fix checks**: a prompt listing each failing check, its
     link and the tail of its failed GitHub Actions log.
@@ -22,11 +23,15 @@ GitHub lookup for the thread's environment (`gh pr view` on the branch).
     resolve.
   - Changes requested → **Address review**: a prompt with the review bodies and
     unresolved review threads (`path:line`, author, comment).
-  - Ready to merge → **Merge**, immediately, with the repo's allowed method
-    (the viewer's default if allowed, else squash, merge, rebase). The branch
-    is kept.
+  - Behind its base (branch rules require it) → **Update branch**
+    (`gh pr update-branch`, no prompt). Pull afterwards in the workspace.
+  - Ready to merge (open, no conflict, nothing failing or running, no
+    changes requested, mergeable — checks or not) → **Merge**, immediately,
+    with the repo's allowed method (the viewer's default if allowed, else
+    squash, merge, rebase). The branch is kept.
   - Merged or closed → **Archive** the thread.
-  - Checks running, review required, merge queue → a label, no action.
+  - Checks running, review required, other branch rules, merge queue,
+    mergeability still being computed → a label, no action.
 - Right click: copy number, copy link, open in browser, refresh status.
 
 When you receive one of these prompts, the data in it was fetched just before
