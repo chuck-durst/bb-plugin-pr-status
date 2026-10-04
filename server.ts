@@ -181,6 +181,7 @@ export default async function plugin(bb: BbPluginApi) {
   const snapshots = new Map<string, PrSnapshot>();
   const watched = new Map<string, number>();
   const inFlight = new Map<string, Promise<PrSnapshot>>();
+  const settleTimers = new Set<ReturnType<typeof setTimeout>>();
   const mergeMethods = new Map<string, { method: "merge" | "squash" | "rebase"; at: number }>();
 
   async function environmentOf(threadId: string): Promise<string | null> {
@@ -290,7 +291,11 @@ export default async function plugin(bb: BbPluginApi) {
   async function settle(threadId: string): Promise<void> {
     await refresh(threadId).catch(() => undefined);
     for (const delay of [3_000, 10_000]) {
-      setTimeout(() => void refresh(threadId).catch(() => undefined), delay);
+      const timer = setTimeout(() => {
+        settleTimers.delete(timer);
+        void refresh(threadId).catch(() => undefined);
+      }, delay);
+      settleTimers.add(timer);
     }
   }
 
@@ -602,14 +607,19 @@ export default async function plugin(bb: BbPluginApi) {
           }
           const snapshot = snapshots.get(threadId);
           if (snapshot !== undefined && now - snapshot.fetchedAt < refreshAge(snapshot)) continue;
-          try {
-            await refresh(threadId);
-          } catch (cause) {
-            bb.log.warn(`refresh ${threadId} failed: ${errorMessage(cause)}`);
-          }
+          if (signal.aborted) break;
+          // A refresh can wait on GitHub for a while; stop promptly anyway.
+          await Promise.race([
+            refresh(threadId).catch((cause) =>
+              bb.log.warn(`refresh ${threadId} failed: ${errorMessage(cause)}`),
+            ),
+            sleep(GH_TIMEOUT_MS, signal),
+          ]);
         }
         await sleep(TICK_MS, signal);
       }
+      for (const timer of settleTimers) clearTimeout(timer);
+      settleTimers.clear();
     },
   });
 }
