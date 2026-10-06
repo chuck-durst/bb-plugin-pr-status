@@ -453,8 +453,8 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   async function fixChecksPrompt(pr: PrInfo): Promise<string> {
-    const head = `Les checks CI de la PR #${pr.number} (${pr.url}) échouent (${pr.checks.failedCount}/${pr.checks.totalCount}).`;
-    const fallback = `${head}\nRécupère la liste des checks en échec et leurs logs (\`gh pr checks ${pr.number}\`, puis \`gh run view <run-id> --log-failed\`), identifie la cause, corrige-la, vérifie en local si possible, puis commit et push.`;
+    const head = `CI checks are failing on PR #${pr.number} (${pr.url}) (${pr.checks.failedCount}/${pr.checks.totalCount}).`;
+    const fallback = `${head}\nList the failing checks and their logs (\`gh pr checks ${pr.number}\`, then \`gh run view <run-id> --log-failed\`), find the cause, fix it, verify locally if you can, then commit and push.`;
     const parsed = parsePrUrl(pr.url);
     if (parsed === null) return fallback;
     let checks: { name: string; bucket: string; link: string; workflow: string; description: string }[];
@@ -485,11 +485,11 @@ export default async function plugin(bb: BbPluginApi) {
       sections.push(
         [
           `### ${name}`,
-          check.link ? `Lien : ${check.link}` : null,
-          check.description ? `Description : ${check.description}` : null,
+          check.link ? `Link: ${check.link}` : null,
+          check.description ? `Description: ${check.description}` : null,
           log !== null
-            ? `Extrait des logs (fin) :\n\`\`\`\n${log}\n\`\`\``
-            : "Logs non récupérés : lis-les avec `gh run view <run-id> --log-failed`.",
+            ? `Log excerpt (end):\n\`\`\`\n${log}\n\`\`\``
+            : "Logs not fetched: read them with `gh run view <run-id> --log-failed`.",
         ]
           .filter((line) => line !== null)
           .join("\n"),
@@ -497,40 +497,40 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const more =
       failed.length > MAX_FAILED_CHECKS
-        ? `\n(${failed.length - MAX_FAILED_CHECKS} autre(s) check(s) en échec : \`gh pr checks ${pr.number}\`.)`
+        ? `\n(${failed.length - MAX_FAILED_CHECKS} more failing check(s): \`gh pr checks ${pr.number}\`.)`
         : "";
-    return `${head}\n\n${sections.join("\n\n")}${more}\n\nAnalyse ces échecs, corrige la cause (pas juste le symptôme), vérifie en local si possible, puis commit et push.`;
+    return `${head}\n\n${sections.join("\n\n")}${more}\n\nAnalyze these failures, fix the cause (not just the symptom), verify locally if you can, then commit and push.`;
   }
 
   function commitPushPrompt(pr: PrInfo): string {
     const uncommitted = pr.local?.uncommitted ?? 0;
     const unpushed = pr.local?.unpushed ?? 0;
     const what = [
-      uncommitted > 0 ? `${uncommitted} fichier(s) modifié(s) non commité(s)` : null,
-      unpushed > 0 ? `${unpushed} commit(s) non poussé(s)` : null,
+      uncommitted > 0 ? `${uncommitted} uncommitted file(s)` : null,
+      unpushed > 0 ? `${unpushed} unpushed commit(s)` : null,
     ]
       .filter((part) => part !== null)
-      .join(" et ");
+      .join(" and ");
     return [
-      `Le workspace a du travail qui n'est pas encore sur la PR #${pr.number} (${pr.url})${what ? ` : ${what}` : ""}.`,
-      "Vérifie les changements (`git status`, `git diff`) : commit ce qui fait partie du travail avec un message clair, sans y mettre de fichiers temporaires ou générés par erreur.",
-      `Puis pousse la branche \`${pr.headRefName}\` (\`git push\`).`,
+      `The workspace has work that is not on PR #${pr.number} (${pr.url}) yet${what ? `: ${what}` : ""}.`,
+      "Review the changes (`git status`, `git diff`) and commit what belongs to the work with a clear message, leaving out temporary or accidentally generated files.",
+      `Then push the \`${pr.headRefName}\` branch (\`git push\`).`,
     ].join("\n");
   }
 
   function fixConflictsPrompt(pr: PrInfo): string {
     return [
-      `La PR #${pr.number} (${pr.url}) a des conflits avec \`${pr.baseRefName}\`.`,
-      `Fais un \`git fetch\`, puis rebase la branche \`${pr.headRefName}\` sur \`origin/${pr.baseRefName}\` (ou merge \`origin/${pr.baseRefName}\` si la branche est partagée).`,
-      "Résous chaque conflit en préservant l'intention des deux côtés, vérifie que le projet build et que les tests passent, puis pousse (`--force-with-lease` après un rebase).",
+      `PR #${pr.number} (${pr.url}) has conflicts with \`${pr.baseRefName}\`.`,
+      `Run \`git fetch\`, then rebase \`${pr.headRefName}\` onto \`origin/${pr.baseRefName}\` (or merge \`origin/${pr.baseRefName}\` if the branch is shared).`,
+      "Resolve each conflict keeping the intent of both sides, check that the project builds and the tests pass, then push (`--force-with-lease` after a rebase).",
     ].join("\n");
   }
 
   async function addressReviewPrompt(pr: PrInfo): Promise<string> {
-    const head = `Des changements ont été demandés en review sur la PR #${pr.number} (${pr.url}).`;
+    const head = `Changes were requested in review on PR #${pr.number} (${pr.url}).`;
     const outro =
-      "Traite chaque retour (corrige, ou explique pourquoi pas si un retour te semble discutable), vérifie que tout build et que les tests passent, puis commit et push. Ne résous pas les conversations GitHub toi-même.";
-    const fallback = `${head}\nLis les reviews et les commentaires non résolus (\`gh pr view ${pr.number} --comments\`, \`gh api repos/{owner}/{repo}/pulls/${pr.number}/comments\`).\n${outro}`;
+      "Address each comment (fix it, or explain why not if it seems debatable), check that everything builds and the tests pass, then commit and push. Do not resolve the GitHub conversations yourself.";
+    const fallback = `${head}\nRead the reviews and unresolved comments (\`gh pr view ${pr.number} --comments\`, \`gh api repos/{owner}/{repo}/pulls/${pr.number}/comments\`).\n${outro}`;
     const parsed = parsePrUrl(pr.url);
     if (parsed === null) return fallback;
     const [owner, name] = parsed.repo.split("/");
@@ -572,7 +572,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
     if (pull === undefined) return fallback;
     const quote = (comment: Comment) =>
-      `@${comment.author?.login ?? "?"} : ${truncate(comment.body.trim(), MAX_COMMENT_CHARS)}`;
+      `@${comment.author?.login ?? "?"}: ${truncate(comment.body.trim(), MAX_COMMENT_CHARS)}`;
     const reviews = pull.reviews.nodes
       .filter((review) => review.body.trim() !== "")
       .map((review) => `- ${quote(review)}`);
@@ -588,7 +588,7 @@ export default async function plugin(bb: BbPluginApi) {
     return [
       head,
       reviews.length > 0 ? `\n## Reviews\n${reviews.join("\n")}` : null,
-      threads.length > 0 ? `\n## Commentaires non résolus\n${threads.join("\n")}` : null,
+      threads.length > 0 ? `\n## Unresolved comments\n${threads.join("\n")}` : null,
       `\n${outro}`,
     ]
       .filter((part) => part !== null)
@@ -600,7 +600,7 @@ export default async function plugin(bb: BbPluginApi) {
    * from a feature branch), else the repository's default branch.
    */
   async function createPrompt(threadId: string): Promise<string> {
-    let target = "la branche par défaut";
+    let target = "the default branch";
     try {
       const environment = await bb.sdk.environments.get({
         environmentId: await requireEnvironment(threadId),
@@ -610,7 +610,7 @@ export default async function plugin(bb: BbPluginApi) {
     } catch {
       // Keep the generic target.
     }
-    return `Crée une pull request pour la branche courante vers ${target} : commit et push si nécessaire, avec un titre et une description clairs.`;
+    return `Open a pull request for the current branch against ${target}: commit and push first if needed, with a clear title and description.`;
   }
 
   // -------------------------------------------------------------------------
