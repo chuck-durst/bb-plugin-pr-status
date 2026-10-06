@@ -32,6 +32,10 @@ describe("derivePrKind", () => {
     ["draft", { state: "draft", mergeability: "draft" }, "draft"],
     ["merge queue", { inMergeQueue: true }, "queued"],
     ["checks running", { checks: "pending" }, "checks_pending"],
+    // Work in the workspace not on GitHub: whatever GitHub says is stale.
+    ["local changes on a ready PR", { hasLocalChanges: true }, "unpushed"],
+    ["local changes over failing checks", { hasLocalChanges: true, checks: "failing" }, "unpushed"],
+    ["local changes on a merged PR", { hasLocalChanges: true, state: "merged" }, "merged"],
     ["merged", { state: "merged" }, "merged"],
     ["closed", { state: "closed", mergeability: "unknown" }, "closed"],
   ])("%s", (_name, facts, kind) => {
@@ -48,6 +52,7 @@ describe("derivePrKind", () => {
 describe("prAction", () => {
   it("offers Merge on a ready PR and nothing while waiting", () => {
     expect(prAction("ready")).toBe("merge");
+    expect(prAction("unpushed")).toBe("commit_push");
     expect(prAction("behind")).toBe("update_branch");
     expect(prAction("checking")).toBeNull();
     expect(prAction("blocked")).toBeNull();

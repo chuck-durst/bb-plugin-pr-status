@@ -16,6 +16,10 @@ GitHub lookup for the thread's environment (`gh pr view` on the branch).
   branch). Hidden on the default branch and outside git workspaces.
 - With a PR: `#<number>` opens bb's **GitHub PR** tab in the thread panel
   (falls back to the browser); the right half is the next step.
+  - Uncommitted files or unpushed commits in the workspace (open or draft PR;
+    takes precedence over every other open state) → **Commit and push**: a
+    prompt to commit the work and push the branch. Merge is refused until
+    then, since GitHub's state does not include that work.
   - Draft → **Mark ready** (`gh pr ready`, no prompt).
   - Checks failing → **Fix checks**: a prompt listing each failing check, its
     link and the tail of its failed GitHub Actions log.

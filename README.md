@@ -24,6 +24,7 @@ step.
 
 | State | Tint | Right half |
 | --- | --- | --- |
+| Local work not on GitHub: uncommitted files or unpushed commits in the workspace (wins over every open state) | amber | **Commit and push** — prompt to commit the work and push the branch |
 | Draft | gray | **Mark ready** — runs right away |
 | Checks running | blue | `Checks running 2/5` (no action) |
 | Checks failing | red | **Fix checks** — prompt with each failing check, its link and the tail of its failed log |
@@ -43,6 +44,13 @@ bb's `attention`: bb only says `ready_to_merge` when checks *pass*, so a PR
 without checks would otherwise stay gray, and its `blocked` mixes branch rules,
 "behind base" and GitHub's HAS_HOOKS (mergeable).
 
+GitHub only knows what was pushed, so on an open or draft PR the server also
+reads the workspace (`git status --porcelain=v2 --branch`, commits ahead of the
+upstream or `origin/<branch>`). Any uncommitted file or unpushed commit turns
+the button to **Commit and push**: a green **Merge** would merge a PR without
+that work. The server's merge refuses in that state too. On a workspace on
+another machine, only uncommitted files are seen (bb's status).
+
 Prompts go through the thread's composer and are sent as if typed (queued if
 the agent is busy); a draft you were writing is put back afterwards. The
 tooltip shows title, checks, review and branches. Right click: copy number,
@@ -58,6 +66,7 @@ rebase, whichever is allowed. The branch is not deleted.
 | State | Glyph | Tone |
 | --- | --- | --- |
 | Ready to merge | `GitPullRequest` | success |
+| Local work not pushed (once the header has read it) | `FileDiff` | default |
 | Checks failing | `GitPullRequest` | error |
 | Conflicts | `AlertTriangle` | error |
 | Changes requested | `GitPullRequestArrow` | error |
