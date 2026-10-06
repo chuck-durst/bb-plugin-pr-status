@@ -152,6 +152,8 @@ async function sendPrompt(composer: PluginComposerApi, prompt: string): Promise<
 
 /** Tint per state. Default-palette utilities: host tokens have no greens. */
 const KIND_TINT: Record<PrKind, string> = {
+  unpushed:
+    "border-amber-500/40 bg-amber-500/10 text-amber-700 hover:bg-amber-500/20 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-400",
   ready:
     "border-green-500/40 bg-green-500/10 text-green-700 hover:bg-green-500/20 hover:text-green-700 dark:text-green-400 dark:hover:text-green-400",
   checks_failed:
@@ -179,6 +181,7 @@ const KIND_TINT: Record<PrKind, string> = {
 };
 
 const KIND_ICON: Record<PrKind, string> = {
+  unpushed: "FileDiff",
   draft: "GitPullRequestDraft",
   checks_pending: "Spinner",
   checks_failed: "CircleX",
@@ -196,6 +199,7 @@ const KIND_ICON: Record<PrKind, string> = {
 };
 
 const ACTION_ICON: Record<Exclude<PrAction, null>, string> = {
+  commit_push: "ArrowUp",
   mark_ready: "GitPullRequest",
   fix_checks: "ToolCase",
   fix_conflicts: "ToolCase",
@@ -227,6 +231,15 @@ function statusLabel(pr: PrInfo): string {
   return KIND_LABELS[pr.kind];
 }
 
+function localSummary(pr: PrInfo): string | null {
+  if (pr.local === null || pr.local === undefined) return null;
+  const parts = [
+    pr.local.uncommitted > 0 ? `${pr.local.uncommitted} uncommitted file(s)` : null,
+    pr.local.unpushed > 0 ? `${pr.local.unpushed} unpushed commit(s)` : null,
+  ].filter(Boolean);
+  return parts.length === 0 ? null : `Local: ${parts.join(", ")}`;
+}
+
 function prTitle(pr: PrInfo): string {
   const review =
     pr.review.state === "none" ? null : `review: ${pr.review.state.replace(/_/g, " ")}`;
@@ -236,6 +249,7 @@ function prTitle(pr: PrInfo): string {
     pr.headRefName === ""
       ? null
       : `${pr.headRefName} → ${pr.baseRefName}${pr.autoMerge ? " · auto-merge on" : ""}`,
+    localSummary(pr),
   ]
     .filter((line) => line !== null)
     .join("\n");
@@ -274,7 +288,7 @@ function PrHeaderAction({ threadId, isCompactViewport }: PluginThreadHeaderActio
   );
 
   const prompt = useCallback(
-    (action: "create" | "fix_checks" | "fix_conflicts" | "address_review") =>
+    (action: "create" | "commit_push" | "fix_checks" | "fix_conflicts" | "address_review") =>
       run(async () => {
         const { prompt: text } = await rpc.call("pr_prompt", { threadId, action });
         await sendPrompt(composer, text);
@@ -469,13 +483,21 @@ const rowStatusBridge = {
   },
 };
 
-function rowStatusOf(pr: PluginSidebarPullRequest): PluginComposerThreadRowStatus {
+/**
+ * `hasLocalChanges` comes from the server's last snapshot of the thread, when
+ * the header has asked for one: bb's sidebar data cannot know it.
+ */
+function rowStatusOf(
+  pr: PluginSidebarPullRequest,
+  hasLocalChanges: boolean,
+): PluginComposerThreadRowStatus {
   const kind = derivePrKind({
     state: pr.state,
     checks: pr.experimental_checks.state,
     review: pr.experimental_review.state,
     mergeability: pr.experimental_mergeability.state,
     inMergeQueue: pr.experimental_inMergeQueue,
+    hasLocalChanges,
   });
   return { ...KIND_ROW_STATUS[kind], label: `PR #${pr.number} — ${KIND_LABELS[kind]}` };
 }
@@ -483,12 +505,17 @@ function rowStatusOf(pr: PluginSidebarPullRequest): PluginComposerThreadRowStatu
 /** Mirrors bb's PR state of one thread into the bridge. Renders nothing. */
 function ThreadPrProbe({ threadId }: { threadId: string }) {
   const { pullRequest, isLoading } = experimental_useSidebarThreadPullRequest(threadId);
+  const cached = useCachedPr(threadId);
+  const hasLocalChanges =
+    cached?.source === "server" &&
+    cached.snapshot.pr?.number === pullRequest?.number &&
+    cached.snapshot.pr?.kind === "unpushed";
   // Warm the header's cache: opening this thread then renders at once.
   useEffect(() => {
     if (!isLoading) prCache.setFromSidebar(threadId, pullRequest);
   }, [threadId, pullRequest, isLoading]);
   // The hook may hand back a new object for the same state; key on content.
-  const status = pullRequest === null ? null : rowStatusOf(pullRequest);
+  const status = pullRequest === null ? null : rowStatusOf(pullRequest, hasLocalChanges);
   const key = status === null ? null : JSON.stringify(status);
   useEffect(() => {
     if (key === null) {

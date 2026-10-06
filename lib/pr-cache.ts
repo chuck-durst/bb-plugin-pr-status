@@ -17,7 +17,7 @@ declare const __BB_PLUGIN_ID__: string | undefined;
 
 export interface CachedPr {
   snapshot: PrSnapshot;
-  /** `sidebar` entries lack check counts and branch names. */
+  /** `sidebar` entries lack check counts, branch names and local changes. */
   source: "server" | "sidebar";
 }
 
@@ -138,6 +138,7 @@ export function snapshotFromSidebar(pr: PluginSidebarPullRequest): PrSnapshot {
       review: { state: facts.review, reviewRequestCount: 0 },
       mergeability: { state: facts.mergeability, mergeStateStatus: null },
       inMergeQueue: facts.inMergeQueue,
+      local: null,
     },
   };
 }

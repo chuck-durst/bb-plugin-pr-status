@@ -41,6 +41,7 @@ function pr(kind: PrKind, overrides: Partial<PrInfo> = {}): PrInfo {
     review: { state: "none", reviewRequestCount: 0 },
     mergeability: { state: "mergeable", mergeStateStatus: "CLEAN" },
     inMergeQueue: false,
+    local: kind === "unpushed" ? { uncommitted: 2, unpushed: 1 } : null,
     ...overrides,
   };
 }
@@ -88,6 +89,7 @@ describe("header", () => {
   });
 
   it.each([
+    ["unpushed", "Commit and push"],
     ["draft", "Mark ready"],
     ["checks_failed", "Fix checks"],
     ["conflicts", "Fix conflicts"],
@@ -148,6 +150,13 @@ describe("header", () => {
     fireEvent.click(await slot.findByRole("button", { name: "Fix checks" }));
     await waitFor(() => expect(slot.inspection.composer.submits).toHaveLength(1));
     await waitFor(() => expect(slot.inspection.composer.text).toBe("my draft"));
+  });
+
+  it("asks the agent to commit and push local work, never offering Merge", async () => {
+    const slot = renderHeader(snapshot(pr("unpushed")));
+    fireEvent.click(await slot.findByRole("button", { name: "Commit and push" }));
+    await waitFor(() => expect(slot.inspection.composer.submits).toHaveLength(1));
+    expect(slot.queryByRole("button", { name: "Merge" })).toBeNull();
   });
 
   it("archives a merged thread through the host", async () => {
@@ -259,6 +268,20 @@ describe("sidebar", () => {
     window.dispatchEvent(new Event("bb-commands:running-threads"));
     expect(scripts.inspection.getThreadRowStatus("a")).toMatchObject({ tone: "error" });
 
+    slot.lifecycle.unmount();
+    await scripts.lifecycle.dispose();
+  });
+
+  it("shows local changes the server found instead of bb's ready state", async () => {
+    prCache.setFromServer("a", snapshot(pr("unpushed", { number: 7 })));
+    const scripts = await mountPluginContentScripts(app, { pluginId: "pr-status" });
+    const slot = renderSlot(overlay, {}, {
+      sidebarThreads: { status: "ready", threads: [thread("a")] },
+      sidebarPullRequests: { a: sidebarPr({}) },
+    });
+    await waitFor(() =>
+      expect(scripts.inspection.getThreadRowStatus("a")).toMatchObject({ icon: "FileDiff" }),
+    );
     slot.lifecycle.unmount();
     await scripts.lifecycle.dispose();
   });

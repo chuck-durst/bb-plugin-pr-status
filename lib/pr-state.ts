@@ -5,7 +5,8 @@
 // no checks comes back as `none`, and `blocked` lumps together branch
 // protection, a branch behind its base and GitHub's HAS_HOOKS (which is
 // mergeable). So both surfaces derive the state from the raw facts with
-// `derivePrKind`. Pure data only: the app imports this file, so it must not
+// `derivePrKind`. The server adds what bb does not report at all: work in
+// the workspace that is not on GitHub yet. Pure data only: the app imports this file, so it must not
 // pull in anything server-side.
 
 export type PrAttention =
@@ -23,6 +24,7 @@ export type PrAttention =
   | "review_requested";
 
 export type PrKind =
+  | "unpushed"
   | "draft"
   | "checks_pending"
   | "checks_failed"
@@ -40,6 +42,7 @@ export type PrKind =
 
 /** What the right half of the header button does for a kind. */
 export type PrAction =
+  | "commit_push"
   | "mark_ready"
   | "fix_checks"
   | "fix_conflicts"
@@ -58,6 +61,11 @@ export interface PrFacts {
   /** GitHub's raw mergeStateStatus; the sidebar does not get it. */
   mergeStateStatus?: string | null;
   inMergeQueue: boolean | null;
+  /**
+   * Uncommitted changes or unpushed commits in the workspace: GitHub's view
+   * of the PR is stale. Server only; the sidebar does not get it.
+   */
+  hasLocalChanges?: boolean;
 }
 
 /**
@@ -68,6 +76,9 @@ export interface PrFacts {
 export function derivePrKind(facts: PrFacts): PrKind {
   if (facts.state === "merged") return "merged";
   if (facts.state === "closed") return "closed";
+  // Whatever GitHub says describes code that is not the workspace's: merging
+  // now would leave work behind.
+  if (facts.hasLocalChanges === true) return "unpushed";
   if (facts.mergeability === "conflicts") return "conflicts";
   if (facts.checks === "failing") return "checks_failed";
   if (facts.review === "changes_requested") return "changes_requested";
@@ -93,6 +104,8 @@ export function derivePrKind(facts: PrFacts): PrKind {
 
 export function prAction(kind: PrKind): PrAction {
   switch (kind) {
+    case "unpushed":
+      return "commit_push";
     case "draft":
       return "mark_ready";
     case "checks_failed":
@@ -114,6 +127,7 @@ export function prAction(kind: PrKind): PrAction {
 }
 
 export const ACTION_LABELS: Record<Exclude<PrAction, null>, string> = {
+  commit_push: "Commit and push",
   mark_ready: "Mark ready",
   fix_checks: "Fix checks",
   fix_conflicts: "Fix conflicts",
@@ -124,6 +138,7 @@ export const ACTION_LABELS: Record<Exclude<PrAction, null>, string> = {
 };
 
 export const KIND_LABELS: Record<PrKind, string> = {
+  unpushed: "Local changes not pushed",
   draft: "Draft",
   checks_pending: "Checks running",
   checks_failed: "Checks failing",
@@ -148,6 +163,7 @@ export const KIND_ROW_STATUS: Record<
   PrKind,
   { icon: string; tone: "default" | "error" | "running" | "success" }
 > = {
+  unpushed: { icon: "FileDiff", tone: "default" },
   draft: { icon: "GitPullRequestDraft", tone: "default" },
   checks_pending: { icon: "GitPullRequest", tone: "running" },
   checks_failed: { icon: "GitPullRequest", tone: "error" },

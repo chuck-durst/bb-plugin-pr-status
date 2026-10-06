@@ -6,7 +6,8 @@
 // re-reads the threads someone is looking at on a slow timer, and publishes
 // PR_CHANGED when a snapshot changes so the header button refetches. `gh` is
 // only used for what bb does not expose: the failing checks and their logs,
-// unresolved review threads, and the repository's merge method.
+// unresolved review threads, and the repository's merge method. `git` reads
+// what GitHub cannot know: work in the workspace that is not pushed yet.
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
@@ -36,6 +37,8 @@ const prSchema = z.object({
   review: z.object({ state: z.string(), reviewRequestCount: z.number() }),
   mergeability: z.object({ state: z.string(), mergeStateStatus: z.string().nullable() }),
   inMergeQueue: z.boolean().nullable(),
+  /** Work in the workspace not on GitHub yet; null when it could not be read. */
+  local: z.object({ uncommitted: z.number(), unpushed: z.number() }).nullable(),
 });
 export type PrInfo = Omit<z.infer<typeof prSchema>, "attention" | "kind"> & {
   attention: PrAttention;
@@ -78,7 +81,7 @@ export const rpcContract = defineRpcContract({
   pr_prompt: {
     input: z.object({
       threadId: z.string().min(1),
-      action: z.enum(["create", "fix_checks", "fix_conflicts", "address_review"]),
+      action: z.enum(["create", "commit_push", "fix_checks", "fix_conflicts", "address_review"]),
     }),
     output: z.object({ prompt: z.string() }),
   },
@@ -137,6 +140,29 @@ function parsePrUrl(url: string): { repo: string; number: number } | null {
 const GH_BINARY =
   ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"].find((path) => existsSync(path)) ??
   "gh";
+
+/** Run `git` in a workspace and return stdout. */
+function git(cwd: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "git",
+      ["-C", cwd, ...args],
+      {
+        timeout: GH_TIMEOUT_MS,
+        maxBuffer: 16 * 1024 * 1024,
+        // A status read must not take the index lock from the agent's git.
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+      },
+      (error, stdout, stderr) => {
+        if (error !== null) {
+          reject(new Error(stderr.trim() || error.message));
+          return;
+        }
+        resolve(stdout);
+      },
+    );
+  });
+}
 
 /**
  * Run `gh` and return stdout. Some commands (`gh pr checks`) exit non-zero
@@ -207,6 +233,41 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  /**
+   * Uncommitted files and commits not on the PR's remote branch. Read with
+   * `git` when the workspace is on this machine; otherwise bb's status gives
+   * the uncommitted files only. Null when neither works.
+   */
+  async function localChanges(
+    environmentId: string,
+    headRefName: string,
+  ): Promise<{ uncommitted: number; unpushed: number } | null> {
+    try {
+      const environment = await bb.sdk.environments.get({ environmentId });
+      if (environment.path !== null && existsSync(environment.path)) {
+        const path = environment.path;
+        const status = await git(path, ["status", "--porcelain=v2", "--branch"]);
+        const lines = status.split("\n").filter((line) => line !== "");
+        const uncommitted = lines.filter((line) => !line.startsWith("#")).length;
+        // "# branch.ab +<ahead> -<behind>" is only there with an upstream.
+        const ab = /^# branch\.ab \+(\d+) -\d+$/m.exec(status);
+        const unpushed =
+          ab !== null
+            ? Number(ab[1])
+            : await git(path, ["rev-list", "--count", `refs/remotes/origin/${headRefName}..HEAD`])
+                .then((count) => Number(count.trim()) || 0)
+                .catch(() => 0);
+        return { uncommitted, unpushed };
+      }
+      const status = await bb.sdk.environments.status({ environmentId });
+      if (status.outcome !== "available") return null;
+      return { uncommitted: status.workspace.workingTree.files.length, unpushed: 0 };
+    } catch (cause) {
+      bb.log.warn(`local changes of ${environmentId}: ${errorMessage(cause)}`);
+      return null;
+    }
+  }
+
   async function readSnapshot(threadId: string): Promise<PrSnapshot> {
     const base = { pr: null, canCreate: false, message: null, fetchedAt: Date.now() };
     let environmentId: string | null;
@@ -231,6 +292,10 @@ export default async function plugin(bb: BbPluginApi) {
       return { ...base, outcome: "none", canCreate: await canCreatePr(environmentId) };
     }
     const pr = result.pullRequest;
+    const local =
+      pr.state === "open" || pr.state === "draft"
+        ? await localChanges(environmentId, pr.headRefName)
+        : null;
     return {
       ...base,
       outcome: "pr",
@@ -247,6 +312,7 @@ export default async function plugin(bb: BbPluginApi) {
           mergeability: pr.mergeability.state,
           mergeStateStatus: pr.mergeability.mergeStateStatus,
           inMergeQueue: pr.inMergeQueue,
+          hasLocalChanges: local !== null && local.uncommitted + local.unpushed > 0,
         }),
         baseRefName: pr.baseRefName,
         headRefName: pr.headRefName,
@@ -264,6 +330,7 @@ export default async function plugin(bb: BbPluginApi) {
           mergeStateStatus: pr.mergeability.mergeStateStatus,
         },
         inMergeQueue: pr.inMergeQueue,
+        local,
       },
     };
   }
@@ -435,6 +502,22 @@ export default async function plugin(bb: BbPluginApi) {
     return `${head}\n\n${sections.join("\n\n")}${more}\n\nAnalyse ces échecs, corrige la cause (pas juste le symptôme), vérifie en local si possible, puis commit et push.`;
   }
 
+  function commitPushPrompt(pr: PrInfo): string {
+    const uncommitted = pr.local?.uncommitted ?? 0;
+    const unpushed = pr.local?.unpushed ?? 0;
+    const what = [
+      uncommitted > 0 ? `${uncommitted} fichier(s) modifié(s) non commité(s)` : null,
+      unpushed > 0 ? `${unpushed} commit(s) non poussé(s)` : null,
+    ]
+      .filter((part) => part !== null)
+      .join(" et ");
+    return [
+      `Le workspace a du travail qui n'est pas encore sur la PR #${pr.number} (${pr.url})${what ? ` : ${what}` : ""}.`,
+      "Vérifie les changements (`git status`, `git diff`) : commit ce qui fait partie du travail avec un message clair, sans y mettre de fichiers temporaires ou générés par erreur.",
+      `Puis pousse la branche \`${pr.headRefName}\` (\`git push\`).`,
+    ].join("\n");
+  }
+
   function fixConflictsPrompt(pr: PrInfo): string {
     return [
       `La PR #${pr.number} (${pr.url}) a des conflits avec \`${pr.baseRefName}\`.`,
@@ -555,6 +638,9 @@ export default async function plugin(bb: BbPluginApi) {
     pr_merge: async ({ threadId }) => {
       const { environmentId, pr } = await currentPr(threadId);
       if (pr.state !== "open") throw new Error(`PR #${pr.number} is ${pr.state}.`);
+      if (pr.kind === "unpushed") {
+        throw new Error(`The workspace has work not pushed to PR #${pr.number}: commit and push first.`);
+      }
       const parsed = parsePrUrl(pr.url);
       if (parsed === null) throw new Error(`Not a GitHub pull request: ${pr.url}`);
       const method = await mergeMethodFor(parsed.repo);
@@ -582,6 +668,7 @@ export default async function plugin(bb: BbPluginApi) {
     pr_prompt: async ({ threadId, action }) => {
       if (action === "create") return { prompt: await createPrompt(threadId) };
       const { pr } = await currentPr(threadId);
+      if (action === "commit_push") return { prompt: commitPushPrompt(pr) };
       if (action === "fix_checks") return { prompt: await fixChecksPrompt(pr) };
       if (action === "fix_conflicts") return { prompt: fixConflictsPrompt(pr) };
       return { prompt: await addressReviewPrompt(pr) };
