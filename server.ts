@@ -12,6 +12,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { GH_PR_FIELDS, pullRequestFromGh, type GhPullRequest } from "./lib/gh-pr";
 import { derivePrKind, type PrAttention, type PrKind } from "./lib/pr-state";
 
 /** Realtime channel; the payload is `{ threadId }`. */
@@ -168,12 +169,16 @@ function git(cwd: string, args: string[]): Promise<string> {
  * Run `gh` and return stdout. Some commands (`gh pr checks`) exit non-zero
  * to report a state rather than a failure; `allowFailure` keeps their output.
  */
-function gh(args: string[], options: { allowFailure?: boolean } = {}): Promise<string> {
+function gh(
+  args: string[],
+  options: { allowFailure?: boolean; cwd?: string } = {},
+): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       GH_BINARY,
       args,
       {
+        cwd: options.cwd,
         timeout: GH_TIMEOUT_MS,
         maxBuffer: 16 * 1024 * 1024,
         env: { ...process.env, GH_PROMPT_DISABLED: "1", NO_COLOR: "1" },
@@ -209,6 +214,8 @@ export default async function plugin(bb: BbPluginApi) {
   const inFlight = new Map<string, Promise<PrSnapshot>>();
   const settleTimers = new Set<ReturnType<typeof setTimeout>>();
   const mergeMethods = new Map<string, { method: "merge" | "squash" | "rebase"; at: number }>();
+  /** Threads whose PR bb cannot see and `gh` found (see lib/gh-pr.ts). */
+  const foundByGh = new Set<string>();
 
   async function environmentOf(threadId: string): Promise<string | null> {
     const thread = await bb.sdk.threads.get({ threadId });
@@ -268,6 +275,31 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  /**
+   * The PR of the branch the workspace pushes to, when it is not the local
+   * branch's name: bb only looks the PR up by the local name. Null when
+   * there is no such upstream or no PR on it.
+   */
+  async function upstreamPr(environmentId: string): Promise<GhPullRequest | null> {
+    try {
+      const environment = await bb.sdk.environments.get({ environmentId });
+      if (environment.path === null || !existsSync(environment.path)) return null;
+      const path = environment.path;
+      const local = (await git(path, ["symbolic-ref", "--quiet", "--short", "HEAD"])).trim();
+      const merge = (await git(path, ["config", "--get", `branch.${local}.merge`])).trim();
+      if (!merge.startsWith("refs/heads/")) return null;
+      const upstream = merge.slice("refs/heads/".length);
+      if (upstream === "" || upstream === local) return null;
+      const json = JSON.parse(
+        await gh(["pr", "view", upstream, "--json", GH_PR_FIELDS], { cwd: path }),
+      ) as unknown;
+      return pullRequestFromGh(json, null);
+    } catch {
+      // No upstream, detached HEAD, or `gh` found no PR for the branch.
+      return null;
+    }
+  }
+
   async function readSnapshot(threadId: string): Promise<PrSnapshot> {
     const base = { pr: null, canCreate: false, message: null, fetchedAt: Date.now() };
     let environmentId: string | null;
@@ -288,10 +320,19 @@ export default async function plugin(bb: BbPluginApi) {
     if (result.outcome === "unavailable") {
       return { ...base, outcome: "unavailable", message: result.message };
     }
+    let pr: GhPullRequest;
     if (result.outcome === "absent") {
-      return { ...base, outcome: "none", canCreate: await canCreatePr(environmentId) };
+      const found = await upstreamPr(environmentId);
+      if (found === null) {
+        foundByGh.delete(threadId);
+        return { ...base, outcome: "none", canCreate: await canCreatePr(environmentId) };
+      }
+      foundByGh.add(threadId);
+      pr = found;
+    } else {
+      foundByGh.delete(threadId);
+      pr = result.pullRequest;
     }
-    const pr = result.pullRequest;
     const local =
       pr.state === "open" || pr.state === "draft"
         ? await localChanges(environmentId, pr.headRefName)
@@ -630,6 +671,13 @@ export default async function plugin(bb: BbPluginApi) {
       return cached;
     },
     pr_mark_ready: async ({ threadId }) => {
+      if (foundByGh.has(threadId)) {
+        // bb cannot see this PR, so it cannot act on it either.
+        const { pr } = await currentPr(threadId);
+        await gh(["pr", "ready", pr.url]);
+        await settle(threadId);
+        return { message: `PR #${pr.number} is ready for review` };
+      }
       const environmentId = await requireEnvironment(threadId);
       const result = await bb.sdk.environments.markPullRequestReady({ environmentId });
       await settle(threadId);
@@ -645,8 +693,9 @@ export default async function plugin(bb: BbPluginApi) {
       if (parsed === null) throw new Error(`Not a GitHub pull request: ${pr.url}`);
       const method = await mergeMethodFor(parsed.repo);
       // bb's merge refuses anything it does not call "mergeable", including
-      // GitHub's HAS_HOOKS state, which GitHub does merge.
-      if (pr.mergeability.state !== "mergeable") {
+      // GitHub's HAS_HOOKS state, which GitHub does merge. Nor can it merge
+      // a PR it does not see.
+      if (pr.mergeability.state !== "mergeable" || foundByGh.has(threadId)) {
         await gh(["pr", "merge", String(parsed.number), "-R", parsed.repo, `--${method}`]);
         await settle(threadId);
         return { message: `Merged #${parsed.number}`, method };
@@ -684,6 +733,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.archived", ({ thread }) => {
     watched.delete(thread.id);
     snapshots.delete(thread.id);
+    foundByGh.delete(thread.id);
   });
 
   // Re-read only the threads the app asked about recently, each at a pace

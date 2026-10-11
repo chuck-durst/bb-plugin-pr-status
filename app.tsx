@@ -514,8 +514,15 @@ function ThreadPrProbe({ threadId }: { threadId: string }) {
   useEffect(() => {
     if (!isLoading) prCache.setFromSidebar(threadId, pullRequest);
   }, [threadId, pullRequest, isLoading]);
+  // bb misses a PR pushed under another branch name; the server finds it.
+  const serverPr = cached?.source === "server" ? cached.snapshot.pr : null;
   // The hook may hand back a new object for the same state; key on content.
-  const status = pullRequest === null ? null : rowStatusOf(pullRequest, hasLocalChanges);
+  const status =
+    pullRequest !== null
+      ? rowStatusOf(pullRequest, hasLocalChanges)
+      : !isLoading && serverPr !== null
+        ? { ...KIND_ROW_STATUS[serverPr.kind], label: `PR #${serverPr.number} — ${KIND_LABELS[serverPr.kind]}` }
+        : null;
   const key = status === null ? null : JSON.stringify(status);
   useEffect(() => {
     if (key === null) {
