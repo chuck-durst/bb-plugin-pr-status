@@ -8,6 +8,9 @@ description: How the PR Status plugin shows and acts on the pull request of a th
 The PR Status plugin shows the pull request of the thread's branch in the
 thread header and on the thread's sidebar row. Its state comes from bb's
 GitHub lookup for the thread's environment (`gh pr view` on the branch).
+bb looks the PR up by the local branch name; when the branch pushes under
+another name (`git push -u origin HEAD:feature/x`), the plugin finds the PR
+of that upstream branch itself with `gh`.
 
 ## Header button
 
