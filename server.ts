@@ -82,6 +82,15 @@ export const rpcContract = defineRpcContract({
     input: threadInput,
     output: z.object({ message: z.string(), method: z.string() }),
   },
+  /** The app's resolved "Display" setting, for the plugin log. */
+  pr_display_report: {
+    input: z.object({
+      requested: z.enum(["auto", "plugin", "bb"]),
+      display: z.enum(["plugin", "bb"]).nullable(),
+      fallback: z.string().nullable(),
+    }),
+    output: z.object({ ok: z.literal(true) }),
+  },
   pr_prompt: {
     input: z.object({
       threadId: z.string().min(1),
@@ -213,6 +222,16 @@ function refreshAge(snapshot: PrSnapshot): number {
 
 export default async function plugin(bb: BbPluginApi) {
   const host = createHostApi(bb.sdk);
+  bb.settings.define({
+    display: {
+      type: "select",
+      label: "Display",
+      description:
+        "Header button: auto (the plugin's own tinted button while bb accepts it, else bb's shared header button), plugin (always the plugin's own), or bb (bb's shared header button, bb 0.49+).",
+      options: ["auto", "plugin", "bb"],
+      default: "auto",
+    },
+  });
   bb.log.info(
     host.mode === "legacy"
       ? "PR and git reads through bb's environments API"
@@ -721,6 +740,15 @@ export default async function plugin(bb: BbPluginApi) {
       await gh(["pr", "update-branch", String(parsed.number), "-R", parsed.repo]);
       await settle(threadId);
       return { message: `Updated ${pr.headRefName} with ${pr.baseRefName}` };
+    },
+    pr_display_report: async ({ requested, display, fallback }) => {
+      const shown = display === null ? "no header button" : display === "plugin" ? "the plugin's own header button" : "bb's shared header button";
+      if (fallback !== null) {
+        bb.log.warn(`Display "${requested}" is unavailable (${fallback}): showing ${shown}`);
+      } else {
+        bb.log.info(`Display "${requested}": showing ${shown}`);
+      }
+      return { ok: true as const };
     },
     pr_prompt: async ({ threadId, action }) => {
       if (action === "create") return { prompt: await createPrompt(threadId) };

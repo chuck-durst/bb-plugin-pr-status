@@ -9,8 +9,8 @@
 // Persisted to localStorage so a reload starts warm.
 
 import { useSyncExternalStore } from "react";
-import type { PluginSidebarPullRequest } from "@get-bb/plugin-sdk/app";
 import type { PrSnapshot } from "../server";
+import type { SidebarPr } from "./app-api";
 import { derivePrKind } from "./pr-state";
 
 declare const __BB_PLUGIN_ID__: string | undefined;
@@ -27,6 +27,8 @@ const STORAGE_KEY = `${typeof __BB_PLUGIN_ID__ === "string" ? __BB_PLUGIN_ID__ :
 
 const entries = new Map<string, CachedPr>();
 const listeners = new Set<() => void>();
+/** Bumped on every change, for readers of several threads at once. */
+let version = 0;
 let persistTimer: ReturnType<typeof setTimeout> | undefined;
 
 function load(): void {
@@ -60,6 +62,7 @@ function persistSoon(): void {
 }
 
 function emit(): void {
+  version += 1;
   for (const listener of listeners) listener();
 }
 
@@ -78,7 +81,7 @@ export const prCache = {
     emit();
   },
   /** bb's sidebar knowledge, used only until the server has answered. */
-  setFromSidebar(threadId: string, pr: PluginSidebarPullRequest | null): void {
+  setFromSidebar(threadId: string, pr: SidebarPr | null): void {
     const current = entries.get(threadId);
     if (current?.source === "server") return;
     if (pr === null) {
@@ -93,6 +96,9 @@ export const prCache = {
     entries.set(threadId, { snapshot, source: "sidebar" });
     persistSoon();
     emit();
+  },
+  version(): number {
+    return version;
   },
   subscribe(listener: () => void): () => void {
     listeners.add(listener);
@@ -111,13 +117,13 @@ export function useCachedPr(threadId: string): CachedPr | undefined {
 }
 
 /** A coarse snapshot from bb's per-row PR facts. */
-export function snapshotFromSidebar(pr: PluginSidebarPullRequest): PrSnapshot {
+export function snapshotFromSidebar(pr: SidebarPr): PrSnapshot {
   const facts = {
     state: pr.state,
-    checks: pr.experimental_checks.state,
-    review: pr.experimental_review.state,
-    mergeability: pr.experimental_mergeability.state,
-    inMergeQueue: pr.experimental_inMergeQueue,
+    checks: pr.checks,
+    review: pr.review,
+    mergeability: pr.mergeability,
+    inMergeQueue: pr.inMergeQueue,
   };
   return {
     outcome: "pr",
@@ -133,7 +139,7 @@ export function snapshotFromSidebar(pr: PluginSidebarPullRequest): PrSnapshot {
       kind: derivePrKind(facts),
       baseRefName: "",
       headRefName: "",
-      autoMerge: pr.experimental_autoMerge,
+      autoMerge: pr.autoMerge,
       checks: { state: facts.checks, failedCount: 0, passedCount: 0, pendingCount: 0, totalCount: 0 },
       review: { state: facts.review, reviewRequestCount: 0 },
       mergeability: { state: facts.mergeability, mergeStateStatus: null },
