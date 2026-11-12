@@ -1,10 +1,12 @@
 // bb-plugin-pr-status — the pull request of a thread's branch, always in
 // view, with the next step one click away (the way Conductor does it).
 //
-// bb already knows each environment's PR (`sdk.environments.pullRequest`),
-// so that is the source of truth. The plugin caches one snapshot per thread,
-// re-reads the threads someone is looking at on a slow timer, and publishes
-// PR_CHANGED when a snapshot changes so the header button refetches. `gh` is
+// bb already knows each environment's PR (`sdk.environments.pullRequest` up
+// to bb 0.46, the bundled GitHub PR Status plugin from 0.49: see
+// lib/host-api.ts), so that is the source of truth. The plugin caches one
+// snapshot per thread, re-reads the threads someone is looking at on a slow
+// timer, and publishes PR_CHANGED when a snapshot changes so the header
+// button refetches. `gh` is
 // only used for what bb does not expose: the failing checks and their logs,
 // unresolved review threads, and the repository's merge method. `git` reads
 // what GitHub cannot know: work in the workspace that is not pushed yet.
@@ -13,6 +15,7 @@ import { existsSync } from "node:fs";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { GH_PR_FIELDS, pullRequestFromGh, type GhPullRequest } from "./lib/gh-pr";
+import { createHostApi, type PullRequestRead } from "./lib/host-api";
 import { derivePrKind, type PrAttention, type PrKind } from "./lib/pr-state";
 
 /** Realtime channel; the payload is `{ threadId }`. */
@@ -209,6 +212,12 @@ function refreshAge(snapshot: PrSnapshot): number {
 }
 
 export default async function plugin(bb: BbPluginApi) {
+  const host = createHostApi(bb.sdk);
+  bb.log.info(
+    host.mode === "legacy"
+      ? "PR and git reads through bb's environments API"
+      : "PR and git reads through the GitHub PR Status and Git plugins",
+  );
   const snapshots = new Map<string, PrSnapshot>();
   const watched = new Map<string, number>();
   const inFlight = new Map<string, Promise<PrSnapshot>>();
@@ -231,10 +240,9 @@ export default async function plugin(bb: BbPluginApi) {
   /** Whether a branch without a PR is worth offering "Create PR" for. */
   async function canCreatePr(environmentId: string): Promise<boolean> {
     try {
-      const status = await bb.sdk.environments.status({ environmentId });
+      const status = await host.workspace(environmentId);
       if (status.outcome !== "available") return false;
-      const { currentBranch, defaultBranch } = status.workspace.branch;
-      return currentBranch !== null && currentBranch !== defaultBranch;
+      return status.currentBranch !== null && status.currentBranch !== status.defaultBranch;
     } catch {
       return false;
     }
@@ -266,9 +274,9 @@ export default async function plugin(bb: BbPluginApi) {
                 .catch(() => 0);
         return { uncommitted, unpushed };
       }
-      const status = await bb.sdk.environments.status({ environmentId });
+      const status = await host.workspace(environmentId);
       if (status.outcome !== "available") return null;
-      return { uncommitted: status.workspace.workingTree.files.length, unpushed: 0 };
+      return { uncommitted: status.uncommittedFiles, unpushed: 0 };
     } catch (cause) {
       bb.log.warn(`local changes of ${environmentId}: ${errorMessage(cause)}`);
       return null;
@@ -300,7 +308,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  async function readSnapshot(threadId: string): Promise<PrSnapshot> {
+  async function readSnapshot(threadId: string, fresh = false): Promise<PrSnapshot> {
     const base = { pr: null, canCreate: false, message: null, fetchedAt: Date.now() };
     let environmentId: string | null;
     try {
@@ -311,9 +319,9 @@ export default async function plugin(bb: BbPluginApi) {
     if (environmentId === null) {
       return { ...base, outcome: "unavailable", message: "This thread has no workspace." };
     }
-    let result: Awaited<ReturnType<typeof bb.sdk.environments.pullRequest>>;
+    let result: PullRequestRead;
     try {
-      result = await bb.sdk.environments.pullRequest({ environmentId });
+      result = await host.pullRequest(environmentId, { fresh });
     } catch (cause) {
       return { ...base, outcome: "unavailable", message: errorMessage(cause) };
     }
@@ -377,10 +385,10 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** Re-read one thread (one read at a time per thread) and signal changes. */
-  function refresh(threadId: string): Promise<PrSnapshot> {
+  function refresh(threadId: string, fresh = false): Promise<PrSnapshot> {
     const pending = inFlight.get(threadId);
     if (pending !== undefined) return pending;
-    const next = readSnapshot(threadId)
+    const next = readSnapshot(threadId, fresh)
       .then((snapshot) => {
         const changed = !sameSnapshot(snapshots.get(threadId), snapshot);
         snapshots.set(threadId, snapshot);
@@ -398,11 +406,11 @@ export default async function plugin(bb: BbPluginApi) {
    * lookup for ~10 s, so look again shortly after.
    */
   async function settle(threadId: string): Promise<void> {
-    await refresh(threadId).catch(() => undefined);
+    await refresh(threadId, true).catch(() => undefined);
     for (const delay of [3_000, 12_000, 30_000]) {
       const timer = setTimeout(() => {
         settleTimers.delete(timer);
-        void refresh(threadId).catch(() => undefined);
+        void refresh(threadId, true).catch(() => undefined);
       }, delay);
       settleTimers.add(timer);
     }
@@ -662,7 +670,7 @@ export default async function plugin(bb: BbPluginApi) {
     pr_get: async ({ threadId, force }) => {
       watched.set(threadId, Date.now());
       const cached = snapshots.get(threadId);
-      if (force || cached === undefined) return refresh(threadId);
+      if (force || cached === undefined) return refresh(threadId, force === true);
       // Stale-while-revalidate: answer now, re-read in the background; a
       // change reaches the app through PR_CHANGED.
       if (Date.now() - cached.fetchedAt >= CACHE_FRESH_MS) {
@@ -679,7 +687,7 @@ export default async function plugin(bb: BbPluginApi) {
         return { message: `PR #${pr.number} is ready for review` };
       }
       const environmentId = await requireEnvironment(threadId);
-      const result = await bb.sdk.environments.markPullRequestReady({ environmentId });
+      const result = await host.markReady(environmentId);
       await settle(threadId);
       return { message: result.message };
     },
@@ -700,7 +708,7 @@ export default async function plugin(bb: BbPluginApi) {
         await settle(threadId);
         return { message: `Merged #${parsed.number}`, method };
       }
-      const result = await bb.sdk.environments.mergePullRequest({ environmentId, method });
+      const result = await host.merge(environmentId, method);
       await settle(threadId);
       return { message: result.message, method: result.method };
     },
