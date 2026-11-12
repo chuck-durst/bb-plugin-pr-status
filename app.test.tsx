@@ -67,6 +67,7 @@ function renderHeader(initial: PrSnapshot) {
         pr_update_branch: () => ({ message: "updated" }),
         pr_merge: () => ({ message: "Pull request merge started", method: "squash" }),
         pr_prompt: ({ action }) => ({ prompt: `prompt:${action}` }),
+        pr_display_report: () => ({ ok: true }),
       },
       composer: { scope: { kind: "thread", threadId: "t1" } },
       openUrl: () => true,
@@ -75,6 +76,10 @@ function renderHeader(initial: PrSnapshot) {
 }
 
 describe("header", () => {
+  it("uses the header slot on bb ≤ 0.46 (no header thread actions there)", () => {
+    expect(app.threadHeaderActions).toHaveLength(1);
+  });
+
   it("offers Create PR when the branch has none, and sends the prompt", async () => {
     const slot = renderHeader(snapshot(null, true));
     fireEvent.click(await slot.findByRole("button", { name: "Create PR" }));

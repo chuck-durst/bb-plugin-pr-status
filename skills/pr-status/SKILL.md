@@ -40,6 +40,14 @@ of that upstream branch itself with `gh`.
   - Checks running, review required, other branch rules, merge queue,
     mergeability still being computed → a label, no action.
 - Right click: copy number, copy link, open in browser, refresh status.
+- Setting `display` (`bb plugin config pr-status set display auto|plugin|bb`):
+  `auto` (default) keeps the button above while bb accepts the plugin's own
+  header slot (bb 0.49 does); `bb` uses bb's shared header button (bb 0.49+):
+  `#<number> · <next step>` (the state when there is no step; it then opens
+  the PR), with Open PR, Copy PR link and Refresh PR status in its menu, no
+  tint and no right-click menu; bb's Commit comes first when it shows. A
+  forced value bb does not offer falls back to the other, with a warning in
+  the plugin log (`~/.bb/plugins/pr-status/logs/plugin.log`).
 
 When you receive one of these prompts, the data in it was fetched just before
 sending. Re-check with `gh pr checks <number>` or `gh pr view <number>

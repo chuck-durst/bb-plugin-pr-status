@@ -14,6 +14,20 @@ the machine running bb.
 
 ## Use
 
+**Display setting.** `bb plugin config pr-status set display <value>`, or
+Settings → Installed plugins:
+
+- `auto` (default): the plugin's own button described below while bb accepts
+  it (bb 0.49 still does), else bb's shared header button.
+- `plugin`: always the plugin's own button.
+- `bb`: bb's shared header button (bb 0.49+): one button
+  `#123 · <next step>` (Create PR without a PR), with **Open PR**, **Copy PR
+  link** and **Refresh PR status** in its menu, no tint. All plugins share it;
+  bb's **Commit** comes first when the workspace has changes.
+
+A forced value bb does not offer falls back to the other one, with a warning
+in the plugin log. The next steps below are the same in both.
+
 **Thread header.** Without a PR, a **Create PR** button asks the agent to open
 one (commit, push, title, description), targeting the environment's merge base
 or the default branch. It is hidden on the default branch.
@@ -103,16 +117,27 @@ PR glyph back when the command stops.
 
 ## How it works
 
-- `server.ts` — reads `sdk.environments.pullRequest` (bb caches it 10 s) for
+- `lib/display.ts` — which header shows, from the Display setting and what
+  bb offers.
+- `lib/host-api.ts` and `lib/app-api.ts` — pick bb's API when the plugin
+  loads. Up to bb 0.46: `sdk.environments.pullRequest` / `status` / merge, the
+  header slot and the sidebar PR hook. From bb 0.49: the bundled GitHub PR
+  Status (`bb--github-pr-status`) and Git (`bb--git`) plugins through
+  `sdk.plugins.callRpc` and `experimental_useRpcKeyedQuery`, and header thread
+  actions for the shared button. The old members are reached by key, because bb 0.49's build warns
+  on any dotted access or named import of them, even unused.
+- `server.ts` — reads the PR (bb caches it 10 s) for
   the threads the app shows, re-reads them every 30 s (checks running), 60 s
   (open), 2 min (no PR) or 5 min (merged/closed) while they were viewed in the
   last 10 minutes, and right after each agent turn. Publishes `pr-changed`
   when a snapshot changes, and re-reads 3 s and 10 s after an action (GitHub
 lags). Builds the prompts and runs Mark ready / Update branch / Merge (bb's
 merge, or `gh pr merge` for states bb's merge refuses, like HAS_HOOKS).
-- `app.tsx` — the header button and its context menu; an invisible overlay
-  mirrors bb's own per-row PR state (`experimental_useSidebarThreadPullRequest`,
-  no extra GitHub calls) into row statuses through a content script.
+- `app.tsx` — the header button and its context menu (or the header thread
+  actions); an invisible overlay mirrors bb's own per-row PR state (no extra
+  GitHub calls) into row statuses through a content script.
+- `lib/header-actions.ts` — the header's labels, icons and commands per
+  state.
 - `lib/pr-state.ts` — the states, actions, labels and sidebar glyphs shared by
   both.
 
